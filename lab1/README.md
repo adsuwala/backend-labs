@@ -1,6 +1,6 @@
 # Backend API - Laboratorium 1
 
-**Autor:** Adrian
+**Autor:** Adrian  
 **Grupa:** INMN2(hybryda)
 
 ## Opis projektu
