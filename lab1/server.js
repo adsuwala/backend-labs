@@ -72,6 +72,7 @@ app.get('/', (req, res) => {
     endpoints: {
       'GET /health': 'Check API status',
       'GET /tasks': 'Get all tasks',
+      'GET /tasks/:id': 'Get task by ID',
       'POST /tasks': 'Create a new task',
       'PUT /tasks/:id': 'Update a task',
       'DELETE /tasks/:id': 'Delete a task'
@@ -91,6 +92,27 @@ app.get('/tasks', (req, res) => {
   try {
     const tasks = readTasks();
     sendSuccess(res, 200, tasks);
+  } catch (error) {
+    handleError(error, req, res);
+  }
+});
+
+app.get('/tasks/:id', (req, res) => {
+  try {
+    const idValidation = validateTaskId(req.params.id);
+    if (!idValidation.valid) {
+      return sendError(res, 400, idValidation.error);
+    }
+
+    const taskId = idValidation.id;
+    const tasks = readTasks();
+    const taskResult = findTaskById(tasks, taskId);
+
+    if (!taskResult.found) {
+      return sendError(res, 404, 'Task not found', { id: taskId });
+    }
+
+    sendSuccess(res, 200, taskResult.task);
   } catch (error) {
     handleError(error, req, res);
   }

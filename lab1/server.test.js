@@ -81,6 +81,50 @@ describe('GET /tasks', () => {
   });
 });
 
+describe('GET /tasks/:id', () => {
+  beforeEach(() => {
+    const testTasks = [
+      { id: 1, title: 'Test Task 1', description: 'Description 1', completed: false, createdAt: '2024-01-01T00:00:00.000Z' },
+      { id: 2, title: 'Test Task 2', description: 'Description 2', completed: true, createdAt: '2024-01-02T00:00:00.000Z' }
+    ];
+    fs.writeFileSync(TEST_TASKS_FILE, JSON.stringify(testTasks, null, 2));
+  });
+
+  test('should return task by ID', async () => {
+    const response = await request(app).get('/tasks/1');
+
+    expect(response.status).toBe(200);
+    expect(response.body).toHaveProperty('id', 1);
+    expect(response.body).toHaveProperty('title', 'Test Task 1');
+    expect(response.body).toHaveProperty('description', 'Description 1');
+    expect(response.body).toHaveProperty('completed', false);
+  });
+
+  test('should return 400 for invalid task ID', async () => {
+    const response = await request(app).get('/tasks/invalid');
+
+    expect(response.status).toBe(400);
+    expect(response.body).toHaveProperty('error');
+  });
+
+  test('should return 404 when task not found', async () => {
+    const response = await request(app).get('/tasks/999');
+
+    expect(response.status).toBe(404);
+    expect(response.body).toHaveProperty('error', 'Task not found');
+    expect(response.body).toHaveProperty('id', 999);
+  });
+
+  test('should return correct task when multiple exist', async () => {
+    const response = await request(app).get('/tasks/2');
+
+    expect(response.status).toBe(200);
+    expect(response.body.id).toBe(2);
+    expect(response.body.title).toBe('Test Task 2');
+    expect(response.body.completed).toBe(true);
+  });
+});
+
 describe('POST /tasks', () => {
   test('should create a new task', async () => {
     const newTask = {
