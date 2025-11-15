@@ -7,8 +7,8 @@
 Proste REST API stworzone na zajęciach z backend development.
 
 ## Technologie
-- [Język programowania]
-- [Framework - jeśli używany]
+- JavaScript
+- Node.js
 
 ## Endpointy
 1. GET /health - status API
