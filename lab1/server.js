@@ -5,8 +5,23 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const TASKS_FILE = process.env.TASKS_FILE || path.join(__dirname, 'tasks.json');
+const LOG_FILE = process.env.LOG_FILE || path.join(__dirname, 'api.log');
 
 app.use(express.json());
+
+app.use((req, res, next) => {
+  const startTime = Date.now();
+  res.on('finish', () => {
+    const duration = Date.now() - startTime;
+    const logEntry = `${new Date().toISOString()} ${req.method} ${req.originalUrl} ${res.statusCode} ${duration}ms\n`;
+    fs.appendFile(LOG_FILE, logEntry, err => {
+      if (err) {
+        console.error('Failed to write request log:', err);
+      }
+    });
+  });
+  next();
+});
 
 function readTasks() {
   try {
@@ -91,7 +106,62 @@ app.get('/health', (req, res) => {
 app.get('/tasks', (req, res) => {
   try {
     const tasks = readTasks();
-    sendSuccess(res, 200, tasks);
+    const { completed, sort, page, limit } = req.query;
+    let filteredTasks = tasks;
+
+    if (completed !== undefined) {
+      const normalized = String(completed).toLowerCase();
+      if (normalized !== 'true' && normalized !== 'false') {
+        return sendError(res, 400, 'Completed query parameter must be true or false');
+      }
+
+      const completedValue = normalized === 'true';
+      filteredTasks = tasks.filter(task => Boolean(task.completed) === completedValue);
+    }
+
+    let responseTasks = filteredTasks;
+
+    if (sort !== undefined) {
+      if (sort !== 'createdAt') {
+        return sendError(res, 400, 'Sort parameter must be createdAt');
+      }
+
+      const getCreatedAtTime = task => {
+        const timestamp = Date.parse(task.createdAt || '');
+        return Number.isNaN(timestamp) ? 0 : timestamp;
+      };
+
+      responseTasks = [...filteredTasks].sort((a, b) => getCreatedAtTime(a) - getCreatedAtTime(b));
+    }
+
+    let pageValue = 1;
+    if (page !== undefined) {
+      pageValue = Number(page);
+      if (!Number.isInteger(pageValue) || pageValue < 1) {
+        return sendError(res, 400, 'Page must be a positive integer');
+      }
+    }
+
+    let limitValue = 10;
+    if (limit !== undefined) {
+      limitValue = Number(limit);
+      if (!Number.isInteger(limitValue) || limitValue < 1) {
+        return sendError(res, 400, 'Limit must be a positive integer');
+      }
+    }
+
+    const totalItems = responseTasks.length;
+    const startIndex = (pageValue - 1) * limitValue;
+    const paginatedTasks =
+      startIndex >= totalItems
+        ? []
+        : responseTasks.slice(startIndex, startIndex + limitValue);
+
+    res.set('X-Total-Count', String(totalItems));
+    res.set('X-Page', String(pageValue));
+    res.set('X-Limit', String(limitValue));
+
+    sendSuccess(res, 200, paginatedTasks);
   } catch (error) {
     handleError(error, req, res);
   }

@@ -3,17 +3,23 @@ const fs = require('fs');
 const path = require('path');
 
 const TEST_TASKS_FILE = path.join(__dirname, 'tasks.test.json');
+const TEST_LOG_FILE = path.join(__dirname, 'api.test.log');
 const ORIGINAL_TASKS_FILE = process.env.TASKS_FILE;
+const ORIGINAL_LOG_FILE = process.env.LOG_FILE;
 
 let app;
 
 beforeAll(() => {
   process.env.TASKS_FILE = TEST_TASKS_FILE;
+  process.env.LOG_FILE = TEST_LOG_FILE;
 });
 
 beforeEach(() => {
   if (fs.existsSync(TEST_TASKS_FILE)) {
     fs.unlinkSync(TEST_TASKS_FILE);
+  }
+  if (fs.existsSync(TEST_LOG_FILE)) {
+    fs.unlinkSync(TEST_LOG_FILE);
   }
   delete require.cache[require.resolve('./server')];
   app = require('./server');
@@ -23,16 +29,27 @@ afterEach(() => {
   if (fs.existsSync(TEST_TASKS_FILE)) {
     fs.unlinkSync(TEST_TASKS_FILE);
   }
+  if (fs.existsSync(TEST_LOG_FILE)) {
+    fs.unlinkSync(TEST_LOG_FILE);
+  }
 });
 
 afterAll(() => {
   if (fs.existsSync(TEST_TASKS_FILE)) {
     fs.unlinkSync(TEST_TASKS_FILE);
   }
+  if (fs.existsSync(TEST_LOG_FILE)) {
+    fs.unlinkSync(TEST_LOG_FILE);
+  }
   if (ORIGINAL_TASKS_FILE) {
     process.env.TASKS_FILE = ORIGINAL_TASKS_FILE;
   } else {
     delete process.env.TASKS_FILE;
+  }
+  if (ORIGINAL_LOG_FILE) {
+    process.env.LOG_FILE = ORIGINAL_LOG_FILE;
+  } else {
+    delete process.env.LOG_FILE;
   }
   delete require.cache[require.resolve('./server')];
 });
@@ -78,6 +95,96 @@ describe('GET /tasks', () => {
     expect(response.body).toHaveLength(2);
     expect(response.body[0]).toHaveProperty('id', 1);
     expect(response.body[0]).toHaveProperty('title', 'Test Task 1');
+  });
+
+  test('should filter tasks by completion status', async () => {
+    const testTasks = [
+      { id: 1, title: 'Incomplete Task', description: 'Desc', completed: false, createdAt: '2024-01-03T00:00:00.000Z' },
+      { id: 2, title: 'Completed Task', description: 'Desc', completed: true, createdAt: '2024-01-04T00:00:00.000Z' }
+    ];
+    fs.writeFileSync(TEST_TASKS_FILE, JSON.stringify(testTasks, null, 2));
+
+    const response = await request(app).get('/tasks?completed=true');
+
+    expect(response.status).toBe(200);
+    expect(response.body).toHaveLength(1);
+    expect(response.body[0].id).toBe(2);
+    expect(response.body[0].completed).toBe(true);
+  });
+
+  test('should return 400 for invalid completed parameter', async () => {
+    const response = await request(app).get('/tasks?completed=maybe');
+
+    expect(response.status).toBe(400);
+    expect(response.body).toHaveProperty('error', 'Completed query parameter must be true or false');
+  });
+
+  test('should sort tasks by createdAt', async () => {
+    const testTasks = [
+      { id: 1, title: 'Later Task', description: 'Desc', completed: false, createdAt: '2024-01-05T00:00:00.000Z' },
+      { id: 2, title: 'Earlier Task', description: 'Desc', completed: false, createdAt: '2024-01-01T00:00:00.000Z' },
+      { id: 3, title: 'Middle Task', description: 'Desc', completed: true, createdAt: '2024-01-03T00:00:00.000Z' }
+    ];
+    fs.writeFileSync(TEST_TASKS_FILE, JSON.stringify(testTasks, null, 2));
+
+    const response = await request(app).get('/tasks?sort=createdAt');
+
+    expect(response.status).toBe(200);
+    expect(response.body.map(task => task.id)).toEqual([2, 3, 1]);
+  });
+
+  test('should return 400 for unsupported sort parameter', async () => {
+    const response = await request(app).get('/tasks?sort=title');
+
+    expect(response.status).toBe(400);
+    expect(response.body).toHaveProperty('error', 'Sort parameter must be createdAt');
+  });
+
+  test('should paginate tasks and return headers', async () => {
+    const testTasks = [
+      { id: 1, title: 'Task 1', description: 'Desc', completed: false, createdAt: '2024-01-01T00:00:00.000Z' },
+      { id: 2, title: 'Task 2', description: 'Desc', completed: false, createdAt: '2024-01-02T00:00:00.000Z' },
+      { id: 3, title: 'Task 3', description: 'Desc', completed: true, createdAt: '2024-01-03T00:00:00.000Z' }
+    ];
+    fs.writeFileSync(TEST_TASKS_FILE, JSON.stringify(testTasks, null, 2));
+
+    const response = await request(app).get('/tasks?page=2&limit=1');
+
+    expect(response.status).toBe(200);
+    expect(response.body).toHaveLength(1);
+    expect(response.body[0].id).toBe(2);
+    expect(response.headers['x-total-count']).toBe('3');
+    expect(response.headers['x-page']).toBe('2');
+    expect(response.headers['x-limit']).toBe('1');
+  });
+
+  test('should return empty array when page exceeds total items', async () => {
+    const testTasks = [
+      { id: 1, title: 'Task 1', description: 'Desc', completed: false, createdAt: '2024-01-01T00:00:00.000Z' }
+    ];
+    fs.writeFileSync(TEST_TASKS_FILE, JSON.stringify(testTasks, null, 2));
+
+    const response = await request(app).get('/tasks?page=5&limit=2');
+
+    expect(response.status).toBe(200);
+    expect(response.body).toHaveLength(0);
+    expect(response.headers['x-total-count']).toBe('1');
+    expect(response.headers['x-page']).toBe('5');
+    expect(response.headers['x-limit']).toBe('2');
+  });
+
+  test('should return 400 for invalid page parameter', async () => {
+    const response = await request(app).get('/tasks?page=0');
+
+    expect(response.status).toBe(400);
+    expect(response.body).toHaveProperty('error', 'Page must be a positive integer');
+  });
+
+  test('should return 400 for invalid limit parameter', async () => {
+    const response = await request(app).get('/tasks?limit=0');
+
+    expect(response.status).toBe(400);
+    expect(response.body).toHaveProperty('error', 'Limit must be a positive integer');
   });
 });
 
@@ -415,4 +522,3 @@ describe('Integration tests', () => {
     expect(finalGetResponse.body).toHaveLength(0);
   });
 });
-
