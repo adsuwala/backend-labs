@@ -1,524 +1,336 @@
 const request = require('supertest');
-const fs = require('fs');
-const path = require('path');
 
-const TEST_TASKS_FILE = path.join(__dirname, 'tasks.test.json');
-const TEST_LOG_FILE = path.join(__dirname, 'api.test.log');
-const ORIGINAL_TASKS_FILE = process.env.TASKS_FILE;
-const ORIGINAL_LOG_FILE = process.env.LOG_FILE;
+jest.mock('./supabase', () => {
+  const auth = {
+    signUp: jest.fn(),
+    signInWithPassword: jest.fn(),
+    getUser: jest.fn()
+  };
+
+  return {
+    from: jest.fn(),
+    auth
+  };
+});
+
+const supabase = require('./supabase');
 
 let app;
 
-beforeAll(() => {
-  process.env.TASKS_FILE = TEST_TASKS_FILE;
-  process.env.LOG_FILE = TEST_LOG_FILE;
-});
+const buildListQueryChain = ({ data = [], count = data.length, error = null } = {}) => {
+  const chain = {};
+  chain.select = jest.fn(() => chain);
+  chain.eq = jest.fn(() => chain);
+  chain.gte = jest.fn(() => chain);
+  chain.lte = jest.fn(() => chain);
+  chain.order = jest.fn(() => chain);
+  chain.range = jest.fn().mockResolvedValue({ data, count, error });
+  chain.then = jest.fn((resolve, reject) =>
+    Promise.resolve({ data, error }).then(resolve, reject)
+  );
+  return chain;
+};
+
+const loadServer = () => {
+  delete require.cache[require.resolve('./server')];
+  delete require.cache[require.resolve('./routes/auth')];
+  delete require.cache[require.resolve('./routes/tasks')];
+  delete require.cache[require.resolve('./middleware/auth')];
+  app = require('./server');
+};
 
 beforeEach(() => {
-  if (fs.existsSync(TEST_TASKS_FILE)) {
-    fs.unlinkSync(TEST_TASKS_FILE);
-  }
-  if (fs.existsSync(TEST_LOG_FILE)) {
-    fs.unlinkSync(TEST_LOG_FILE);
-  }
-  delete require.cache[require.resolve('./server')];
-  app = require('./server');
+  jest.clearAllMocks();
+  loadServer();
 });
 
-afterEach(() => {
-  if (fs.existsSync(TEST_TASKS_FILE)) {
-    fs.unlinkSync(TEST_TASKS_FILE);
-  }
-  if (fs.existsSync(TEST_LOG_FILE)) {
-    fs.unlinkSync(TEST_LOG_FILE);
-  }
-});
-
-afterAll(() => {
-  if (fs.existsSync(TEST_TASKS_FILE)) {
-    fs.unlinkSync(TEST_TASKS_FILE);
-  }
-  if (fs.existsSync(TEST_LOG_FILE)) {
-    fs.unlinkSync(TEST_LOG_FILE);
-  }
-  if (ORIGINAL_TASKS_FILE) {
-    process.env.TASKS_FILE = ORIGINAL_TASKS_FILE;
-  } else {
-    delete process.env.TASKS_FILE;
-  }
-  if (ORIGINAL_LOG_FILE) {
-    process.env.LOG_FILE = ORIGINAL_LOG_FILE;
-  } else {
-    delete process.env.LOG_FILE;
-  }
-  delete require.cache[require.resolve('./server')];
-});
-
-describe('GET /', () => {
-  test('should return API information', async () => {
+describe('Base routes', () => {
+  test('GET / should return API information', async () => {
     const response = await request(app).get('/');
     expect(response.status).toBe(200);
     expect(response.body).toHaveProperty('message');
-    expect(response.body).toHaveProperty('endpoints');
-    expect(response.body.endpoints).toHaveProperty('GET /health');
+    expect(response.body.endpoints).toHaveProperty('POST /auth/login');
   });
-});
 
-describe('GET /health', () => {
-  test('should return OK status with timestamp', async () => {
+  test('GET /health should return OK status', async () => {
     const response = await request(app).get('/health');
     expect(response.status).toBe(200);
-    expect(response.body).toHaveProperty('status', 'OK');
-    expect(response.body).toHaveProperty('timestamp');
-    expect(new Date(response.body.timestamp).toISOString()).toBe(response.body.timestamp);
+    expect(response.body).toEqual(
+      expect.objectContaining({
+        status: 'OK',
+        timestamp: expect.any(String)
+      })
+    );
   });
 });
 
-describe('GET /tasks', () => {
-  test('should return empty array when no tasks exist', async () => {
+describe('Auth routes', () => {
+  test('POST /auth/register should register a user', async () => {
+    supabase.auth.signUp.mockResolvedValue({
+      data: { user: { id: 'user-1', email: 'test@example.com' } },
+      error: null
+    });
+
+    const response = await request(app)
+      .post('/auth/register')
+      .send({ email: 'test@example.com', password: 'Password123!' });
+
+    expect(supabase.auth.signUp).toHaveBeenCalledWith({
+      email: 'test@example.com',
+      password: 'Password123!'
+    });
+    expect(response.status).toBe(201);
+    expect(response.body).toHaveProperty('message', 'User created');
+    expect(response.body.user).toEqual({ id: 'user-1', email: 'test@example.com' });
+  });
+
+  test('POST /auth/login should return a token', async () => {
+    supabase.auth.signInWithPassword.mockResolvedValue({
+      data: {
+        session: { access_token: 'token-123' },
+        user: { id: 'user-1', email: 'test@example.com' }
+      },
+      error: null
+    });
+
+    const response = await request(app)
+      .post('/auth/login')
+      .send({ email: 'test@example.com', password: 'Password123!' });
+
+    expect(supabase.auth.signInWithPassword).toHaveBeenCalledWith({
+      email: 'test@example.com',
+      password: 'Password123!'
+    });
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      token: 'token-123',
+      user: { id: 'user-1', email: 'test@example.com' }
+    });
+  });
+});
+
+describe('Task routes', () => {
+  const authorizeRequest = () => {
+    supabase.auth.getUser.mockResolvedValue({
+      data: { user: { id: 'user-1', email: 'test@example.com' } },
+      error: null
+    });
+  };
+
+  test('GET /tasks should require authorization', async () => {
     const response = await request(app).get('/tasks');
-    expect(response.status).toBe(200);
-    expect(Array.isArray(response.body)).toBe(true);
-    expect(response.body).toHaveLength(0);
+    expect(response.status).toBe(401);
+    expect(response.body).toHaveProperty('error');
+    expect(supabase.from).not.toHaveBeenCalled();
   });
 
-  test('should return all tasks', async () => {
-    const testTasks = [
-      { id: 1, title: 'Test Task 1', description: 'Description 1', completed: false, createdAt: '2024-01-01T00:00:00.000Z' },
-      { id: 2, title: 'Test Task 2', description: 'Description 2', completed: true, createdAt: '2024-01-02T00:00:00.000Z' }
+  test('GET /tasks should return Supabase data without pagination when no limit provided', async () => {
+    authorizeRequest();
+    const tasks = [
+      { id: '1', title: 'Task A', completed: false },
+      { id: '2', title: 'Task B', completed: true }
     ];
-    fs.writeFileSync(TEST_TASKS_FILE, JSON.stringify(testTasks, null, 2));
+    const chain = buildListQueryChain({ data: tasks });
+    supabase.from.mockReturnValue(chain);
 
-    const response = await request(app).get('/tasks');
+    const response = await request(app)
+      .get('/tasks')
+      .set('Authorization', 'Bearer token-123');
+
+    expect(chain.range).not.toHaveBeenCalled();
+    expect(chain.then).toHaveBeenCalled();
     expect(response.status).toBe(200);
-    expect(Array.isArray(response.body)).toBe(true);
-    expect(response.body).toHaveLength(2);
-    expect(response.body[0]).toHaveProperty('id', 1);
-    expect(response.body[0]).toHaveProperty('title', 'Test Task 1');
+    expect(response.body).toEqual(tasks);
+    expect(response.headers['x-total-count']).toBeUndefined();
   });
 
-  test('should filter tasks by completion status', async () => {
-    const testTasks = [
-      { id: 1, title: 'Incomplete Task', description: 'Desc', completed: false, createdAt: '2024-01-03T00:00:00.000Z' },
-      { id: 2, title: 'Completed Task', description: 'Desc', completed: true, createdAt: '2024-01-04T00:00:00.000Z' }
+  test('GET /tasks should return paginated data when limit provided', async () => {
+    authorizeRequest();
+    const tasks = [
+      { id: '1', title: 'Task A', completed: false },
+      { id: '2', title: 'Task B', completed: true }
     ];
-    fs.writeFileSync(TEST_TASKS_FILE, JSON.stringify(testTasks, null, 2));
+    const chain = buildListQueryChain({ data: tasks, count: 2 });
+    supabase.from.mockReturnValue(chain);
 
-    const response = await request(app).get('/tasks?completed=true');
+    const response = await request(app)
+      .get('/tasks?page=1&limit=2&sort=createdAt')
+      .set('Authorization', 'Bearer token-123');
 
+    expect(chain.select).toHaveBeenCalledWith('*', { count: 'exact' });
+    expect(chain.order).toHaveBeenCalledWith('created_at', { ascending: true });
+    expect(chain.range).toHaveBeenCalledWith(0, 1);
     expect(response.status).toBe(200);
-    expect(response.body).toHaveLength(1);
-    expect(response.body[0].id).toBe(2);
-    expect(response.body[0].completed).toBe(true);
-  });
-
-  test('should return 400 for invalid completed parameter', async () => {
-    const response = await request(app).get('/tasks?completed=maybe');
-
-    expect(response.status).toBe(400);
-    expect(response.body).toHaveProperty('error', 'Completed query parameter must be true or false');
-  });
-
-  test('should sort tasks by createdAt', async () => {
-    const testTasks = [
-      { id: 1, title: 'Later Task', description: 'Desc', completed: false, createdAt: '2024-01-05T00:00:00.000Z' },
-      { id: 2, title: 'Earlier Task', description: 'Desc', completed: false, createdAt: '2024-01-01T00:00:00.000Z' },
-      { id: 3, title: 'Middle Task', description: 'Desc', completed: true, createdAt: '2024-01-03T00:00:00.000Z' }
-    ];
-    fs.writeFileSync(TEST_TASKS_FILE, JSON.stringify(testTasks, null, 2));
-
-    const response = await request(app).get('/tasks?sort=createdAt');
-
-    expect(response.status).toBe(200);
-    expect(response.body.map(task => task.id)).toEqual([2, 3, 1]);
-  });
-
-  test('should return 400 for unsupported sort parameter', async () => {
-    const response = await request(app).get('/tasks?sort=title');
-
-    expect(response.status).toBe(400);
-    expect(response.body).toHaveProperty('error', 'Sort parameter must be createdAt');
-  });
-
-  test('should paginate tasks and return headers', async () => {
-    const testTasks = [
-      { id: 1, title: 'Task 1', description: 'Desc', completed: false, createdAt: '2024-01-01T00:00:00.000Z' },
-      { id: 2, title: 'Task 2', description: 'Desc', completed: false, createdAt: '2024-01-02T00:00:00.000Z' },
-      { id: 3, title: 'Task 3', description: 'Desc', completed: true, createdAt: '2024-01-03T00:00:00.000Z' }
-    ];
-    fs.writeFileSync(TEST_TASKS_FILE, JSON.stringify(testTasks, null, 2));
-
-    const response = await request(app).get('/tasks?page=2&limit=1');
-
-    expect(response.status).toBe(200);
-    expect(response.body).toHaveLength(1);
-    expect(response.body[0].id).toBe(2);
-    expect(response.headers['x-total-count']).toBe('3');
-    expect(response.headers['x-page']).toBe('2');
-    expect(response.headers['x-limit']).toBe('1');
-  });
-
-  test('should return empty array when page exceeds total items', async () => {
-    const testTasks = [
-      { id: 1, title: 'Task 1', description: 'Desc', completed: false, createdAt: '2024-01-01T00:00:00.000Z' }
-    ];
-    fs.writeFileSync(TEST_TASKS_FILE, JSON.stringify(testTasks, null, 2));
-
-    const response = await request(app).get('/tasks?page=5&limit=2');
-
-    expect(response.status).toBe(200);
-    expect(response.body).toHaveLength(0);
-    expect(response.headers['x-total-count']).toBe('1');
-    expect(response.headers['x-page']).toBe('5');
+    expect(response.body).toEqual(tasks);
+    expect(response.headers['x-total-count']).toBe('2');
+    expect(response.headers['x-page']).toBe('1');
     expect(response.headers['x-limit']).toBe('2');
   });
 
-  test('should return 400 for invalid page parameter', async () => {
-    const response = await request(app).get('/tasks?page=0');
+  test('GET /tasks should filter by completion flag', async () => {
+    authorizeRequest();
+    const chain = buildListQueryChain({ data: [], count: 0 });
+    supabase.from.mockReturnValue(chain);
 
-    expect(response.status).toBe(400);
-    expect(response.body).toHaveProperty('error', 'Page must be a positive integer');
-  });
+    const response = await request(app)
+      .get('/tasks?completed=true')
+      .set('Authorization', 'Bearer token-123');
 
-  test('should return 400 for invalid limit parameter', async () => {
-    const response = await request(app).get('/tasks?limit=0');
-
-    expect(response.status).toBe(400);
-    expect(response.body).toHaveProperty('error', 'Limit must be a positive integer');
-  });
-});
-
-describe('GET /tasks/:id', () => {
-  beforeEach(() => {
-    const testTasks = [
-      { id: 1, title: 'Test Task 1', description: 'Description 1', completed: false, createdAt: '2024-01-01T00:00:00.000Z' },
-      { id: 2, title: 'Test Task 2', description: 'Description 2', completed: true, createdAt: '2024-01-02T00:00:00.000Z' }
-    ];
-    fs.writeFileSync(TEST_TASKS_FILE, JSON.stringify(testTasks, null, 2));
-  });
-
-  test('should return task by ID', async () => {
-    const response = await request(app).get('/tasks/1');
-
+    expect(chain.eq).toHaveBeenCalledWith('completed', true);
     expect(response.status).toBe(200);
-    expect(response.body).toHaveProperty('id', 1);
-    expect(response.body).toHaveProperty('title', 'Test Task 1');
-    expect(response.body).toHaveProperty('description', 'Description 1');
-    expect(response.body).toHaveProperty('completed', false);
   });
 
-  test('should return 400 for invalid task ID', async () => {
-    const response = await request(app).get('/tasks/invalid');
+  test('GET /tasks should require limit when page is provided', async () => {
+    authorizeRequest();
+
+    const response = await request(app)
+      .get('/tasks?page=2')
+      .set('Authorization', 'Bearer token-123');
 
     expect(response.status).toBe(400);
-    expect(response.body).toHaveProperty('error');
+    expect(response.body).toHaveProperty('error', 'Limit must be provided when using page');
+    expect(supabase.from).not.toHaveBeenCalled();
   });
 
-  test('should return 404 when task not found', async () => {
-    const response = await request(app).get('/tasks/999');
+  test('GET /tasks should return 400 for invalid completed filter', async () => {
+    authorizeRequest();
+
+    const response = await request(app)
+      .get('/tasks?completed=maybe')
+      .set('Authorization', 'Bearer token-123');
+
+    expect(response.status).toBe(400);
+    expect(response.body).toHaveProperty('error', 'Completed must be true or false');
+    expect(supabase.from).not.toHaveBeenCalled();
+  });
+
+  test('GET /tasks should filter by created date range', async () => {
+    authorizeRequest();
+    const chain = buildListQueryChain({ data: [], count: 0 });
+    supabase.from.mockReturnValue(chain);
+
+    await request(app)
+      .get('/tasks?createdFrom=2024-01-01&createdTo=2024-01-31')
+      .set('Authorization', 'Bearer token-123');
+
+    expect(chain.gte).toHaveBeenCalledWith('created_at', new Date('2024-01-01').toISOString());
+    expect(chain.lte).toHaveBeenCalledWith('created_at', new Date('2024-01-31').toISOString());
+  });
+
+  test('GET /tasks/:id should return single task', async () => {
+    authorizeRequest();
+    const task = { id: 'uuid-1', title: 'Single', completed: false };
+    const singleMock = jest.fn().mockResolvedValue({ data: task, error: null });
+    const eqMock = jest.fn().mockReturnValue({ single: singleMock });
+    const selectMock = jest.fn().mockReturnValue({ eq: eqMock });
+    supabase.from.mockReturnValue({ select: selectMock });
+
+    const response = await request(app)
+      .get('/tasks/uuid-1')
+      .set('Authorization', 'Bearer token-123');
+
+    expect(selectMock).toHaveBeenCalledWith('*');
+    expect(eqMock).toHaveBeenCalledWith('id', 'uuid-1');
+    expect(singleMock).toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual(task);
+  });
+
+  test('GET /tasks/:id should return 404 when not found', async () => {
+    authorizeRequest();
+    const singleMock = jest.fn().mockResolvedValue({
+      data: null,
+      error: { code: 'PGRST116', message: 'Not found' }
+    });
+    const eqMock = jest.fn().mockReturnValue({ single: singleMock });
+    const selectMock = jest.fn().mockReturnValue({ eq: eqMock });
+    supabase.from.mockReturnValue({ select: selectMock });
+
+    const response = await request(app)
+      .get('/tasks/missing')
+      .set('Authorization', 'Bearer token-123');
 
     expect(response.status).toBe(404);
     expect(response.body).toHaveProperty('error', 'Task not found');
-    expect(response.body).toHaveProperty('id', 999);
   });
 
-  test('should return correct task when multiple exist', async () => {
-    const response = await request(app).get('/tasks/2');
+  test('POST /tasks should validate payload', async () => {
+    authorizeRequest();
+    const response = await request(app)
+      .post('/tasks')
+      .set('Authorization', 'Bearer token-123')
+      .send({});
 
-    expect(response.status).toBe(200);
-    expect(response.body.id).toBe(2);
-    expect(response.body.title).toBe('Test Task 2');
-    expect(response.body.completed).toBe(true);
+    expect(response.status).toBe(400);
+    expect(response.body).toHaveProperty('error', 'Title is required');
+    expect(supabase.from).not.toHaveBeenCalled();
   });
-});
 
-describe('POST /tasks', () => {
-  test('should create a new task', async () => {
-    const newTask = {
-      title: 'New Task',
-      description: 'Task description'
-    };
+  test('POST /tasks should create task in Supabase', async () => {
+    authorizeRequest();
+    const createdTask = { id: 'uuid-1', title: 'New Task', completed: false };
+
+    const singleMock = jest.fn().mockResolvedValue({ data: createdTask, error: null });
+    const selectMock = jest.fn().mockReturnValue({ single: singleMock });
+    const insertMock = jest.fn().mockReturnValue({ select: selectMock });
+
+    supabase.from.mockReturnValue({
+      insert: insertMock
+    });
 
     const response = await request(app)
       .post('/tasks')
-      .send(newTask)
-      .set('Content-Type', 'application/json');
+      .set('Authorization', 'Bearer token-123')
+      .send({ title: ' New Task ' });
 
+    expect(insertMock).toHaveBeenCalledWith({ title: 'New Task' });
+    expect(singleMock).toHaveBeenCalled();
     expect(response.status).toBe(201);
-    expect(response.body).toHaveProperty('id');
-    expect(response.body).toHaveProperty('title', 'New Task');
-    expect(response.body).toHaveProperty('description', 'Task description');
-    expect(response.body).toHaveProperty('completed', false);
-    expect(response.body).toHaveProperty('createdAt');
+    expect(response.body).toEqual(createdTask);
   });
 
-  test('should create task without description', async () => {
-    const newTask = {
-      title: 'Task without description'
-    };
+  test('PATCH /tasks/:id should update completion flag', async () => {
+    authorizeRequest();
+    const updatedTask = { id: 'uuid-1', title: 'Task', completed: true };
+
+    const singleMock = jest.fn().mockResolvedValue({ data: updatedTask, error: null });
+    const selectMock = jest.fn().mockReturnValue({ single: singleMock });
+    const eqMock = jest.fn().mockReturnValue({ select: selectMock });
+    const updateMock = jest.fn().mockReturnValue({ eq: eqMock });
+
+    supabase.from.mockReturnValue({
+      update: updateMock
+    });
 
     const response = await request(app)
-      .post('/tasks')
-      .send(newTask);
-
-    expect(response.status).toBe(201);
-    expect(response.body).toHaveProperty('title', 'Task without description');
-    expect(response.body).toHaveProperty('description', '');
-  });
-
-  test('should trim title and description', async () => {
-    const newTask = {
-      title: '  Trimmed Title  ',
-      description: '  Trimmed Description  '
-    };
-
-    const response = await request(app)
-      .post('/tasks')
-      .send(newTask);
-
-    expect(response.status).toBe(201);
-    expect(response.body.title).toBe('Trimmed Title');
-    expect(response.body.description).toBe('Trimmed Description');
-  });
-
-  test('should return 400 when title is missing', async () => {
-    const response = await request(app)
-      .post('/tasks')
-      .send({ description: 'Some description' });
-
-    expect(response.status).toBe(400);
-    expect(response.body).toHaveProperty('error');
-  });
-
-  test('should return 400 when title is empty string', async () => {
-    const response = await request(app)
-      .post('/tasks')
-      .send({ title: '   ', description: 'Some description' });
-
-    expect(response.status).toBe(400);
-    expect(response.body).toHaveProperty('error');
-  });
-
-  test('should return 400 when title is not a string', async () => {
-    const response = await request(app)
-      .post('/tasks')
-      .send({ title: 123, description: 'Some description' });
-
-    expect(response.status).toBe(400);
-    expect(response.body).toHaveProperty('error');
-  });
-
-  test('should return 400 when description is not a string', async () => {
-    const response = await request(app)
-      .post('/tasks')
-      .send({ title: 'Valid title', description: 123 });
-
-    expect(response.status).toBe(400);
-    expect(response.body).toHaveProperty('error');
-  });
-
-  test('should generate unique IDs', async () => {
-    const task1 = { title: 'Task 1' };
-    const task2 = { title: 'Task 2' };
-
-    const response1 = await request(app).post('/tasks').send(task1);
-    const response2 = await request(app).post('/tasks').send(task2);
-
-    expect(response1.body.id).toBe(1);
-    expect(response2.body.id).toBe(2);
-  });
-});
-
-describe('PUT /tasks/:id', () => {
-  beforeEach(() => {
-    const testTasks = [
-      { id: 1, title: 'Original Title', description: 'Original Description', completed: false, createdAt: '2024-01-01T00:00:00.000Z' }
-    ];
-    fs.writeFileSync(TEST_TASKS_FILE, JSON.stringify(testTasks, null, 2));
-  });
-
-  test('should update task title', async () => {
-    const response = await request(app)
-      .put('/tasks/1')
-      .send({ title: 'Updated Title' });
-
-    expect(response.status).toBe(200);
-    expect(response.body).toHaveProperty('title', 'Updated Title');
-    expect(response.body).toHaveProperty('updatedAt');
-  });
-
-  test('should update task description', async () => {
-    const response = await request(app)
-      .put('/tasks/1')
-      .send({ description: 'Updated Description' });
-
-    expect(response.status).toBe(200);
-    expect(response.body).toHaveProperty('description', 'Updated Description');
-    expect(response.body).toHaveProperty('updatedAt');
-  });
-
-  test('should update task completed status', async () => {
-    const response = await request(app)
-      .put('/tasks/1')
+      .patch('/tasks/uuid-1')
+      .set('Authorization', 'Bearer token-123')
       .send({ completed: true });
 
+    expect(updateMock).toHaveBeenCalledWith({ completed: true });
+    expect(eqMock).toHaveBeenCalledWith('id', 'uuid-1');
     expect(response.status).toBe(200);
-    expect(response.body).toHaveProperty('completed', true);
-    expect(response.body).toHaveProperty('updatedAt');
+    expect(response.body).toEqual(updatedTask);
   });
 
-  test('should update multiple fields', async () => {
+  test('DELETE /tasks/:id should delete task', async () => {
+    authorizeRequest();
+    const singleMock = jest.fn().mockResolvedValue({ data: { id: 'uuid-1' }, error: null });
+    const selectMock = jest.fn().mockReturnValue({ single: singleMock });
+    const eqMock = jest.fn().mockReturnValue({ select: selectMock });
+    const deleteMock = jest.fn().mockReturnValue({ eq: eqMock });
+
+    supabase.from.mockReturnValue({
+      delete: deleteMock
+    });
+
     const response = await request(app)
-      .put('/tasks/1')
-      .send({
-        title: 'New Title',
-        description: 'New Description',
-        completed: true
-      });
+      .delete('/tasks/uuid-1')
+      .set('Authorization', 'Bearer token-123');
 
-    expect(response.status).toBe(200);
-    expect(response.body.title).toBe('New Title');
-    expect(response.body.description).toBe('New Description');
-    expect(response.body.completed).toBe(true);
-    expect(response.body).toHaveProperty('updatedAt');
-  });
-
-  test('should trim title and description', async () => {
-    const response = await request(app)
-      .put('/tasks/1')
-      .send({
-        title: '  Trimmed Title  ',
-        description: '  Trimmed Description  '
-      });
-
-    expect(response.status).toBe(200);
-    expect(response.body.title).toBe('Trimmed Title');
-    expect(response.body.description).toBe('Trimmed Description');
-  });
-
-  test('should return 400 for invalid task ID', async () => {
-    const response = await request(app)
-      .put('/tasks/invalid')
-      .send({ title: 'New Title' });
-
-    expect(response.status).toBe(400);
-    expect(response.body).toHaveProperty('error');
-  });
-
-  test('should return 404 when task not found', async () => {
-    const response = await request(app)
-      .put('/tasks/999')
-      .send({ title: 'New Title' });
-
-    expect(response.status).toBe(404);
-    expect(response.body).toHaveProperty('error', 'Task not found');
-    expect(response.body).toHaveProperty('id', 999);
-  });
-
-  test('should return 400 when title is empty string', async () => {
-    const response = await request(app)
-      .put('/tasks/1')
-      .send({ title: '   ' });
-
-    expect(response.status).toBe(400);
-    expect(response.body).toHaveProperty('error');
-  });
-
-  test('should return 400 when title is not a string', async () => {
-    const response = await request(app)
-      .put('/tasks/1')
-      .send({ title: 123 });
-
-    expect(response.status).toBe(400);
-    expect(response.body).toHaveProperty('error');
-  });
-
-  test('should return 400 when description is not a string', async () => {
-    const response = await request(app)
-      .put('/tasks/1')
-      .send({ description: 123 });
-
-    expect(response.status).toBe(400);
-    expect(response.body).toHaveProperty('error');
-  });
-
-  test('should return 400 when completed is not a boolean', async () => {
-    const response = await request(app)
-      .put('/tasks/1')
-      .send({ completed: 'true' });
-
-    expect(response.status).toBe(400);
-    expect(response.body).toHaveProperty('error');
-  });
-});
-
-describe('DELETE /tasks/:id', () => {
-  beforeEach(() => {
-    const testTasks = [
-      { id: 1, title: 'Task 1', description: 'Description 1', completed: false, createdAt: '2024-01-01T00:00:00.000Z' },
-      { id: 2, title: 'Task 2', description: 'Description 2', completed: false, createdAt: '2024-01-02T00:00:00.000Z' }
-    ];
-    fs.writeFileSync(TEST_TASKS_FILE, JSON.stringify(testTasks, null, 2));
-  });
-
-  test('should delete task by ID', async () => {
-    const response = await request(app).delete('/tasks/1');
-
-    expect(response.status).toBe(200);
-    expect(response.body).toHaveProperty('message', 'Task deleted successfully');
-    expect(response.body).toHaveProperty('id', 1);
-
-    const getResponse = await request(app).get('/tasks');
-    expect(getResponse.body).toHaveLength(1);
-    expect(getResponse.body[0].id).toBe(2);
-  });
-
-  test('should return 400 for invalid task ID', async () => {
-    const response = await request(app).delete('/tasks/invalid');
-
-    expect(response.status).toBe(400);
-    expect(response.body).toHaveProperty('error');
-  });
-
-  test('should return 404 when task not found', async () => {
-    const response = await request(app).delete('/tasks/999');
-
-    expect(response.status).toBe(404);
-    expect(response.body).toHaveProperty('error', 'Task not found');
-    expect(response.body).toHaveProperty('id', 999);
-  });
-
-  test('should delete correct task when multiple exist', async () => {
-    await request(app).delete('/tasks/1');
-
-    const response = await request(app).get('/tasks');
-    expect(response.body).toHaveLength(1);
-    expect(response.body[0].id).toBe(2);
-  });
-});
-
-describe('Integration tests', () => {
-  test('should create, read, update and delete task', async () => {
-    const newTask = { title: 'Integration Test Task', description: 'Test Description' };
-
-    const createResponse = await request(app).post('/tasks').send(newTask);
-    expect(createResponse.status).toBe(201);
-    const taskId = createResponse.body.id;
-
-    const getResponse = await request(app).get('/tasks');
-    expect(getResponse.body).toHaveLength(1);
-    expect(getResponse.body[0].id).toBe(taskId);
-
-    const updateResponse = await request(app)
-      .put(`/tasks/${taskId}`)
-      .send({ completed: true });
-    expect(updateResponse.status).toBe(200);
-    expect(updateResponse.body.completed).toBe(true);
-
-    const deleteResponse = await request(app).delete(`/tasks/${taskId}`);
-    expect(deleteResponse.status).toBe(200);
-
-    const finalGetResponse = await request(app).get('/tasks');
-    expect(finalGetResponse.body).toHaveLength(0);
+    expect(deleteMock).toHaveBeenCalled();
+    expect(eqMock).toHaveBeenCalledWith('id', 'uuid-1');
+    expect(response.status).toBe(204);
+    expect(response.text).toBe('');
   });
 });
