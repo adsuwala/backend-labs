@@ -39,19 +39,19 @@ npm run start
 
 # 6. (Opcjonalnie) Testy
 npm test
+```
 
 ## Dostępne endpointy
 
 - `POST /auth/register` – rejestracja użytkownika w Supabase.
 - `POST /auth/login` – logowanie i pobranie tokena JWT (nagłówek `Authorization: Bearer <token>` wymagany w /tasks).
-- `GET /tasks` – lista zadań z obsługą zapytań:
+- `GET /tasks` – lista zadań zalogowanego użytkownika z obsługą zapytań:
   - `completed=true|false`
   - `sort=createdAt` (rosnąco) lub `sort=-createdAt` (malejąco, domyślne)
   - `limit` i `page` (paginacja tylko gdy podasz `limit`, strona domyślna = 1)
   - `createdFrom`, `createdTo` – zakres dat ISO (np. `2024-01-01`)
-  Nagłówki `X-Total-Count`, `X-Page`, `X-Limit` są ustawiane wyłącznie przy aktywnej paginacji.
-- `GET /tasks/:id` – pojedynczy task po UUID.
-- `POST /tasks` – tworzenie zadania (JSON `{ "title": "..." }`).
-- `PATCH /tasks/:id` – aktualizacja pola `completed`.
-- `DELETE /tasks/:id` – usunięcie zadania.
-```
+    Nagłówki `X-Total-Count`, `X-Page`, `X-Limit` są ustawiane wyłącznie przy aktywnej paginacji.
+- `GET /tasks/:id` – pojedynczy task po UUID (należący do bieżącego użytkownika).
+- `POST /tasks` – tworzenie zadania (JSON `{ "title": "..." }` – `user_id` ustawia backend).
+- `PATCH /tasks/:id` – aktualizacja pola `completed` w zadaniu użytkownika.
+- `DELETE /tasks/:id` – usunięcie zadania użytkownika.

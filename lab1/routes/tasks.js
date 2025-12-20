@@ -13,6 +13,10 @@ router.get('/', async (req, res) => {
       createdFrom,
       createdTo
     } = req.query;
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
 
     const usesPagination = limit !== undefined;
     if (page !== undefined && !usesPagination) {
@@ -65,6 +69,8 @@ router.get('/', async (req, res) => {
     let query = usesPagination
       ? supabase.from('tasks').select('*', { count: 'exact' })
       : supabase.from('tasks').select('*');
+
+    query = query.eq('user_id', userId);
 
     if (completedValue !== undefined) {
       query = query.eq('completed', completedValue);
@@ -120,11 +126,16 @@ router.get('/', async (req, res) => {
 
 router.get('/:id', async (req, res) => {
   const { id } = req.params;
+  const userId = req.user?.id;
+  if (!userId) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
   try {
     const { data, error } = await supabase
       .from('tasks')
       .select('*')
       .eq('id', id)
+      .eq('user_id', userId)
       .single();
 
     if (error) {
@@ -147,6 +158,10 @@ router.get('/:id', async (req, res) => {
 
 router.post('/', async (req, res) => {
   const { title } = req.body;
+  const userId = req.user?.id;
+  if (!userId) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
   if (!title || typeof title !== 'string' || title.trim() === '') {
     return res.status(400).json({ error: 'Title is required' });
   }
@@ -154,7 +169,7 @@ router.post('/', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('tasks')
-      .insert({ title: title.trim() })
+      .insert({ title: title.trim(), user_id: userId })
       .select()
       .single();
 
@@ -172,6 +187,10 @@ router.post('/', async (req, res) => {
 router.patch('/:id', async (req, res) => {
   const { id } = req.params;
   const { completed } = req.body;
+  const userId = req.user?.id;
+  if (!userId) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
 
   if (completed === undefined || typeof completed !== 'boolean') {
     return res.status(400).json({ error: 'Completed flag is required and must be boolean' });
@@ -182,6 +201,7 @@ router.patch('/:id', async (req, res) => {
       .from('tasks')
       .update({ completed })
       .eq('id', id)
+      .eq('user_id', userId)
       .select()
       .single();
 
@@ -198,11 +218,16 @@ router.patch('/:id', async (req, res) => {
 
 router.delete('/:id', async (req, res) => {
   const { id } = req.params;
+  const userId = req.user?.id;
+  if (!userId) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
   try {
     const { data, error } = await supabase
       .from('tasks')
       .delete()
       .eq('id', id)
+      .eq('user_id', userId)
       .select()
       .single();
 

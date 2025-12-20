@@ -31,6 +31,14 @@ const buildListQueryChain = ({ data = [], count = data.length, error = null } = 
   return chain;
 };
 
+const buildSingleQueryChain = ({ data, error } = {}) => {
+  const chain = {};
+  chain.select = jest.fn(() => chain);
+  chain.eq = jest.fn(() => chain);
+  chain.single = jest.fn().mockResolvedValue({ data, error });
+  return chain;
+};
+
 const loadServer = () => {
   delete require.cache[require.resolve('./server')];
   delete require.cache[require.resolve('./routes/auth')];
@@ -139,6 +147,7 @@ describe('Task routes', () => {
 
     expect(chain.range).not.toHaveBeenCalled();
     expect(chain.then).toHaveBeenCalled();
+    expect(chain.eq).toHaveBeenCalledWith('user_id', 'user-1');
     expect(response.status).toBe(200);
     expect(response.body).toEqual(tasks);
     expect(response.headers['x-total-count']).toBeUndefined();
@@ -159,6 +168,7 @@ describe('Task routes', () => {
 
     expect(chain.select).toHaveBeenCalledWith('*', { count: 'exact' });
     expect(chain.order).toHaveBeenCalledWith('created_at', { ascending: true });
+    expect(chain.eq).toHaveBeenCalledWith('user_id', 'user-1');
     expect(chain.range).toHaveBeenCalledWith(0, 1);
     expect(response.status).toBe(200);
     expect(response.body).toEqual(tasks);
@@ -176,6 +186,7 @@ describe('Task routes', () => {
       .get('/tasks?completed=true')
       .set('Authorization', 'Bearer token-123');
 
+    expect(chain.eq).toHaveBeenCalledWith('user_id', 'user-1');
     expect(chain.eq).toHaveBeenCalledWith('completed', true);
     expect(response.status).toBe(200);
   });
@@ -213,6 +224,7 @@ describe('Task routes', () => {
       .get('/tasks?createdFrom=2024-01-01&createdTo=2024-01-31')
       .set('Authorization', 'Bearer token-123');
 
+    expect(chain.eq).toHaveBeenCalledWith('user_id', 'user-1');
     expect(chain.gte).toHaveBeenCalledWith('created_at', new Date('2024-01-01').toISOString());
     expect(chain.lte).toHaveBeenCalledWith('created_at', new Date('2024-01-31').toISOString());
   });
@@ -220,36 +232,34 @@ describe('Task routes', () => {
   test('GET /tasks/:id should return single task', async () => {
     authorizeRequest();
     const task = { id: 'uuid-1', title: 'Single', completed: false };
-    const singleMock = jest.fn().mockResolvedValue({ data: task, error: null });
-    const eqMock = jest.fn().mockReturnValue({ single: singleMock });
-    const selectMock = jest.fn().mockReturnValue({ eq: eqMock });
-    supabase.from.mockReturnValue({ select: selectMock });
+    const chain = buildSingleQueryChain({ data: task, error: null });
+    supabase.from.mockReturnValue(chain);
 
     const response = await request(app)
       .get('/tasks/uuid-1')
       .set('Authorization', 'Bearer token-123');
 
-    expect(selectMock).toHaveBeenCalledWith('*');
-    expect(eqMock).toHaveBeenCalledWith('id', 'uuid-1');
-    expect(singleMock).toHaveBeenCalled();
+    expect(chain.select).toHaveBeenCalledWith('*');
+    expect(chain.eq).toHaveBeenCalledWith('id', 'uuid-1');
+    expect(chain.eq).toHaveBeenCalledWith('user_id', 'user-1');
+    expect(chain.single).toHaveBeenCalled();
     expect(response.status).toBe(200);
     expect(response.body).toEqual(task);
   });
 
   test('GET /tasks/:id should return 404 when not found', async () => {
     authorizeRequest();
-    const singleMock = jest.fn().mockResolvedValue({
+    const chain = buildSingleQueryChain({
       data: null,
       error: { code: 'PGRST116', message: 'Not found' }
     });
-    const eqMock = jest.fn().mockReturnValue({ single: singleMock });
-    const selectMock = jest.fn().mockReturnValue({ eq: eqMock });
-    supabase.from.mockReturnValue({ select: selectMock });
+    supabase.from.mockReturnValue(chain);
 
     const response = await request(app)
       .get('/tasks/missing')
       .set('Authorization', 'Bearer token-123');
 
+    expect(chain.eq).toHaveBeenCalledWith('user_id', 'user-1');
     expect(response.status).toBe(404);
     expect(response.body).toHaveProperty('error', 'Task not found');
   });
@@ -283,7 +293,7 @@ describe('Task routes', () => {
       .set('Authorization', 'Bearer token-123')
       .send({ title: ' New Task ' });
 
-    expect(insertMock).toHaveBeenCalledWith({ title: 'New Task' });
+    expect(insertMock).toHaveBeenCalledWith({ title: 'New Task', user_id: 'user-1' });
     expect(singleMock).toHaveBeenCalled();
     expect(response.status).toBe(201);
     expect(response.body).toEqual(createdTask);
@@ -293,10 +303,12 @@ describe('Task routes', () => {
     authorizeRequest();
     const updatedTask = { id: 'uuid-1', title: 'Task', completed: true };
 
+    const chain = {};
     const singleMock = jest.fn().mockResolvedValue({ data: updatedTask, error: null });
-    const selectMock = jest.fn().mockReturnValue({ single: singleMock });
-    const eqMock = jest.fn().mockReturnValue({ select: selectMock });
-    const updateMock = jest.fn().mockReturnValue({ eq: eqMock });
+    chain.eq = jest.fn(() => chain);
+    chain.select = jest.fn(() => chain);
+    chain.single = singleMock;
+    const updateMock = jest.fn(() => chain);
 
     supabase.from.mockReturnValue({
       update: updateMock
@@ -308,17 +320,20 @@ describe('Task routes', () => {
       .send({ completed: true });
 
     expect(updateMock).toHaveBeenCalledWith({ completed: true });
-    expect(eqMock).toHaveBeenCalledWith('id', 'uuid-1');
+    expect(chain.eq).toHaveBeenCalledWith('id', 'uuid-1');
+    expect(chain.eq).toHaveBeenCalledWith('user_id', 'user-1');
     expect(response.status).toBe(200);
     expect(response.body).toEqual(updatedTask);
   });
 
   test('DELETE /tasks/:id should delete task', async () => {
     authorizeRequest();
+    const chain = {};
     const singleMock = jest.fn().mockResolvedValue({ data: { id: 'uuid-1' }, error: null });
-    const selectMock = jest.fn().mockReturnValue({ single: singleMock });
-    const eqMock = jest.fn().mockReturnValue({ select: selectMock });
-    const deleteMock = jest.fn().mockReturnValue({ eq: eqMock });
+    chain.eq = jest.fn(() => chain);
+    chain.select = jest.fn(() => chain);
+    chain.single = singleMock;
+    const deleteMock = jest.fn(() => chain);
 
     supabase.from.mockReturnValue({
       delete: deleteMock
@@ -329,7 +344,8 @@ describe('Task routes', () => {
       .set('Authorization', 'Bearer token-123');
 
     expect(deleteMock).toHaveBeenCalled();
-    expect(eqMock).toHaveBeenCalledWith('id', 'uuid-1');
+    expect(chain.eq).toHaveBeenCalledWith('id', 'uuid-1');
+    expect(chain.eq).toHaveBeenCalledWith('user_id', 'user-1');
     expect(response.status).toBe(204);
     expect(response.text).toBe('');
   });
