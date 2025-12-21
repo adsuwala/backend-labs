@@ -1,7 +1,22 @@
 const express = require('express');
 const supabase = require('../supabase');
+const { UUID_REGEX } = require('../utils/validation');
 
 const router = express.Router();
+
+const TASK_NOT_FOUND_MESSAGE = 'Task not found';
+const ACCESS_DENIED_MESSAGE = 'Access denied';
+
+const isTaskNotFoundError = error =>
+  error?.code === 'PGRST116' ||
+  error?.message?.includes('Cannot coerce the result to a single JSON object');
+
+const handleTaskError = (res, error, fallbackMessage) => {
+  if (isTaskNotFoundError(error)) {
+    return res.status(404).json({ error: TASK_NOT_FOUND_MESSAGE });
+  }
+  return res.status(500).json({ error: fallbackMessage });
+};
 
 router.get('/', async (req, res) => {
   try {
@@ -14,6 +29,7 @@ router.get('/', async (req, res) => {
       createdTo
     } = req.query;
     const userId = req.user?.id;
+    const isAdmin = req.user?.role === 'admin';
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
@@ -70,7 +86,9 @@ router.get('/', async (req, res) => {
       ? supabase.from('tasks').select('*', { count: 'exact' })
       : supabase.from('tasks').select('*');
 
-    query = query.eq('user_id', userId);
+    if (!isAdmin) {
+      query = query.eq('user_id', userId);
+    }
 
     if (completedValue !== undefined) {
       query = query.eq('completed', completedValue);
@@ -104,7 +122,7 @@ router.get('/', async (req, res) => {
       const { data, error, count } = await query.range(startIndex, endIndex);
 
       if (error) {
-        return res.status(500).json({ error: error.message });
+        return res.status(500).json({ error: 'Failed to fetch tasks' });
       }
 
       res.set('X-Total-Count', String(count ?? 0));
@@ -115,7 +133,7 @@ router.get('/', async (req, res) => {
 
     const { data, error } = await query;
     if (error) {
-      return res.status(500).json({ error: error.message });
+      return res.status(500).json({ error: 'Failed to fetch tasks' });
     }
     return res.json(data || []);
   } catch (err) {
@@ -127,26 +145,30 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   const { id } = req.params;
   const userId = req.user?.id;
+  const isAdmin = req.user?.role === 'admin';
   if (!userId) {
     return res.status(401).json({ error: 'Unauthorized' });
+  }
+  if (!UUID_REGEX.test(id)) {
+    return res.status(400).json({ error: 'Task ID must be a valid UUID' });
   }
   try {
     const { data, error } = await supabase
       .from('tasks')
       .select('*')
       .eq('id', id)
-      .eq('user_id', userId)
       .single();
 
     if (error) {
-      if (error.code === 'PGRST116') {
-        return res.status(404).json({ error: 'Task not found' });
-      }
-      return res.status(500).json({ error: error.message });
+      return handleTaskError(res, error, 'Failed to fetch task');
     }
 
     if (!data) {
-      return res.status(404).json({ error: 'Task not found' });
+      return res.status(404).json({ error: TASK_NOT_FOUND_MESSAGE });
+    }
+
+    if (!isAdmin && data.user_id !== userId) {
+      return res.status(403).json({ error: ACCESS_DENIED_MESSAGE });
     }
 
     return res.json(data);
@@ -174,7 +196,7 @@ router.post('/', async (req, res) => {
       .single();
 
     if (error) {
-      return res.status(500).json({ error: error.message });
+      return res.status(500).json({ error: 'Failed to create task' });
     }
 
     return res.status(201).json(data);
@@ -188,25 +210,48 @@ router.patch('/:id', async (req, res) => {
   const { id } = req.params;
   const { completed } = req.body;
   const userId = req.user?.id;
+  const isAdmin = req.user?.role === 'admin';
   if (!userId) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
+  if (!UUID_REGEX.test(id)) {
+    return res.status(400).json({ error: 'Task ID must be a valid UUID' });
+  }
 
   if (completed === undefined || typeof completed !== 'boolean') {
-    return res.status(400).json({ error: 'Completed flag is required and must be boolean' });
+    return res.status(400).json({
+      error: 'Provide a true/false flag in the request body'
+    });
   }
 
   try {
+    const { data: existingTask, error: fetchError } = await supabase
+      .from('tasks')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (fetchError) {
+      return handleTaskError(res, fetchError, 'Failed to update task');
+    }
+
+    if (!existingTask) {
+      return res.status(404).json({ error: TASK_NOT_FOUND_MESSAGE });
+    }
+
+    if (!isAdmin && existingTask.user_id !== userId) {
+      return res.status(403).json({ error: ACCESS_DENIED_MESSAGE });
+    }
+
     const { data, error } = await supabase
       .from('tasks')
       .update({ completed })
       .eq('id', id)
-      .eq('user_id', userId)
       .select()
       .single();
 
     if (error) {
-      return res.status(error.code === 'PGRST116' ? 404 : 500).json({ error: error.message });
+      return handleTaskError(res, error, 'Failed to update task');
     }
 
     return res.json(data);
@@ -219,24 +264,36 @@ router.patch('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   const { id } = req.params;
   const userId = req.user?.id;
+  const isAdmin = req.user?.role === 'admin';
   if (!userId) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
+  if (!UUID_REGEX.test(id)) {
+    return res.status(400).json({ error: 'Task ID must be a valid UUID' });
+  }
   try {
-    const { data, error } = await supabase
+    const { data: existingTask, error: fetchError } = await supabase
       .from('tasks')
-      .delete()
+      .select('*')
       .eq('id', id)
-      .eq('user_id', userId)
-      .select()
       .single();
 
-    if (error) {
-      return res.status(error.code === 'PGRST116' ? 404 : 500).json({ error: error.message });
+    if (fetchError) {
+      return handleTaskError(res, fetchError, 'Failed to delete task');
     }
 
-    if (!data) {
-      return res.status(404).json({ error: 'Task not found' });
+    if (!existingTask) {
+      return res.status(404).json({ error: TASK_NOT_FOUND_MESSAGE });
+    }
+
+    if (!isAdmin && existingTask.user_id !== userId) {
+      return res.status(403).json({ error: ACCESS_DENIED_MESSAGE });
+    }
+
+    const { error } = await supabase.from('tasks').delete().eq('id', id);
+
+    if (error) {
+      return handleTaskError(res, error, 'Failed to delete task');
     }
 
     return res.status(204).send();

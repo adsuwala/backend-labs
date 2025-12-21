@@ -9,13 +9,24 @@ jest.mock('./supabase', () => {
 
   return {
     from: jest.fn(),
-    auth
+    auth,
+    admin: {
+      auth: {
+        admin: {
+          deleteUser: jest.fn()
+        }
+      }
+    }
   };
 });
 
 const supabase = require('./supabase');
 
 let app;
+
+const VALID_TASK_ID = '550e8400-e29b-41d4-a716-446655440001';
+const OTHER_TASK_ID = '550e8400-e29b-41d4-a716-446655440002';
+const ADMIN_ID = '550e8400-e29b-41d4-a716-446655440000';
 
 const buildListQueryChain = ({ data = [], count = data.length, error = null } = {}) => {
   const chain = {};
@@ -37,6 +48,13 @@ const buildSingleQueryChain = ({ data, error } = {}) => {
   chain.eq = jest.fn(() => chain);
   chain.single = jest.fn().mockResolvedValue({ data, error });
   return chain;
+};
+
+const authorizeRequest = ({ userId = 'user-1', email = 'test@example.com' } = {}) => {
+  supabase.auth.getUser.mockResolvedValue({
+    data: { user: { id: userId, email } },
+    error: null
+  });
 };
 
 const loadServer = () => {
@@ -75,7 +93,13 @@ describe('Base routes', () => {
 describe('Auth routes', () => {
   test('POST /auth/register should register a user', async () => {
     supabase.auth.signUp.mockResolvedValue({
-      data: { user: { id: 'user-1', email: 'test@example.com' } },
+      data: {
+        user: {
+          id: 'user-1',
+          email: 'test@example.com',
+          created_at: '2024-01-01T00:00:00Z'
+        }
+      },
       error: null
     });
 
@@ -89,13 +113,18 @@ describe('Auth routes', () => {
     });
     expect(response.status).toBe(201);
     expect(response.body).toHaveProperty('message', 'User created');
-    expect(response.body.user).toEqual({ id: 'user-1', email: 'test@example.com' });
+    expect(response.body.user).toEqual({
+      id: 'user-1',
+      email: 'test@example.com',
+      role: 'user',
+      created_at: '2024-01-01T00:00:00Z'
+    });
   });
 
   test('POST /auth/login should return a token', async () => {
     supabase.auth.signInWithPassword.mockResolvedValue({
       data: {
-        session: { access_token: 'token-123' },
+        session: { access_token: 'header.eyJ1c2VyX3JvbGUiOiJhZG1pbiJ9.signature' },
         user: { id: 'user-1', email: 'test@example.com' }
       },
       error: null
@@ -111,19 +140,13 @@ describe('Auth routes', () => {
     });
     expect(response.status).toBe(200);
     expect(response.body).toEqual({
-      token: 'token-123',
-      user: { id: 'user-1', email: 'test@example.com' }
+      token: 'header.eyJ1c2VyX3JvbGUiOiJhZG1pbiJ9.signature',
+      user: { id: 'user-1', email: 'test@example.com', role: 'admin' }
     });
   });
 });
 
 describe('Task routes', () => {
-  const authorizeRequest = () => {
-    supabase.auth.getUser.mockResolvedValue({
-      data: { user: { id: 'user-1', email: 'test@example.com' } },
-      error: null
-    });
-  };
 
   test('GET /tasks should require authorization', async () => {
     const response = await request(app).get('/tasks');
@@ -231,17 +254,16 @@ describe('Task routes', () => {
 
   test('GET /tasks/:id should return single task', async () => {
     authorizeRequest();
-    const task = { id: 'uuid-1', title: 'Single', completed: false };
+    const task = { id: VALID_TASK_ID, title: 'Single', completed: false, user_id: 'user-1' };
     const chain = buildSingleQueryChain({ data: task, error: null });
     supabase.from.mockReturnValue(chain);
 
     const response = await request(app)
-      .get('/tasks/uuid-1')
+      .get(`/tasks/${VALID_TASK_ID}`)
       .set('Authorization', 'Bearer token-123');
 
     expect(chain.select).toHaveBeenCalledWith('*');
-    expect(chain.eq).toHaveBeenCalledWith('id', 'uuid-1');
-    expect(chain.eq).toHaveBeenCalledWith('user_id', 'user-1');
+    expect(chain.eq).toHaveBeenCalledWith('id', VALID_TASK_ID);
     expect(chain.single).toHaveBeenCalled();
     expect(response.status).toBe(200);
     expect(response.body).toEqual(task);
@@ -256,12 +278,25 @@ describe('Task routes', () => {
     supabase.from.mockReturnValue(chain);
 
     const response = await request(app)
-      .get('/tasks/missing')
+      .get('/tasks/660e8400-e29b-41d4-a716-446655440099')
       .set('Authorization', 'Bearer token-123');
 
-    expect(chain.eq).toHaveBeenCalledWith('user_id', 'user-1');
     expect(response.status).toBe(404);
     expect(response.body).toHaveProperty('error', 'Task not found');
+  });
+
+  test('GET /tasks/:id should return 403 when user does not own the task', async () => {
+    authorizeRequest();
+    const task = { id: VALID_TASK_ID, title: 'Other', completed: false, user_id: 'user-2' };
+    const chain = buildSingleQueryChain({ data: task, error: null });
+    supabase.from.mockReturnValue(chain);
+
+    const response = await request(app)
+      .get(`/tasks/${VALID_TASK_ID}`)
+      .set('Authorization', 'Bearer token-123');
+
+    expect(response.status).toBe(403);
+    expect(response.body).toEqual({ error: 'Access denied' });
   });
 
   test('POST /tasks should validate payload', async () => {
@@ -278,7 +313,7 @@ describe('Task routes', () => {
 
   test('POST /tasks should create task in Supabase', async () => {
     authorizeRequest();
-    const createdTask = { id: 'uuid-1', title: 'New Task', completed: false };
+    const createdTask = { id: VALID_TASK_ID, title: 'New Task', completed: false };
 
     const singleMock = jest.fn().mockResolvedValue({ data: createdTask, error: null });
     const selectMock = jest.fn().mockReturnValue({ single: singleMock });
@@ -301,52 +336,144 @@ describe('Task routes', () => {
 
   test('PATCH /tasks/:id should update completion flag', async () => {
     authorizeRequest();
-    const updatedTask = { id: 'uuid-1', title: 'Task', completed: true };
+    const updatedTask = { id: VALID_TASK_ID, title: 'Task', completed: true };
 
-    const chain = {};
-    const singleMock = jest.fn().mockResolvedValue({ data: updatedTask, error: null });
-    chain.eq = jest.fn(() => chain);
-    chain.select = jest.fn(() => chain);
-    chain.single = singleMock;
-    const updateMock = jest.fn(() => chain);
-
-    supabase.from.mockReturnValue({
-      update: updateMock
+    const fetchChain = buildSingleQueryChain({
+      data: { id: VALID_TASK_ID, user_id: 'user-1', completed: false },
+      error: null
     });
+    const updateChain = buildSingleQueryChain({ data: updatedTask, error: null });
+    const updateMock = jest.fn(() => updateChain);
+
+    supabase.from
+      .mockReturnValueOnce(fetchChain)
+      .mockReturnValueOnce({ update: updateMock });
 
     const response = await request(app)
-      .patch('/tasks/uuid-1')
+      .patch(`/tasks/${VALID_TASK_ID}`)
       .set('Authorization', 'Bearer token-123')
       .send({ completed: true });
 
     expect(updateMock).toHaveBeenCalledWith({ completed: true });
-    expect(chain.eq).toHaveBeenCalledWith('id', 'uuid-1');
-    expect(chain.eq).toHaveBeenCalledWith('user_id', 'user-1');
+    expect(fetchChain.eq).toHaveBeenCalledWith('id', VALID_TASK_ID);
     expect(response.status).toBe(200);
     expect(response.body).toEqual(updatedTask);
   });
 
-  test('DELETE /tasks/:id should delete task', async () => {
+  test('PATCH /tasks/:id should return 403 when updating foreign task', async () => {
     authorizeRequest();
-    const chain = {};
-    const singleMock = jest.fn().mockResolvedValue({ data: { id: 'uuid-1' }, error: null });
-    chain.eq = jest.fn(() => chain);
-    chain.select = jest.fn(() => chain);
-    chain.single = singleMock;
-    const deleteMock = jest.fn(() => chain);
-
-    supabase.from.mockReturnValue({
-      delete: deleteMock
+    const fetchChain = buildSingleQueryChain({
+      data: { id: VALID_TASK_ID, user_id: 'user-2', completed: false },
+      error: null
     });
 
+    supabase.from.mockReturnValueOnce(fetchChain);
+
     const response = await request(app)
-      .delete('/tasks/uuid-1')
+      .patch(`/tasks/${VALID_TASK_ID}`)
+      .set('Authorization', 'Bearer token-123')
+      .send({ completed: true });
+
+    expect(response.status).toBe(403);
+    expect(response.body).toEqual({ error: 'Access denied' });
+    expect(supabase.from).toHaveBeenCalledTimes(1);
+  });
+
+  test('DELETE /tasks/:id should delete task', async () => {
+    authorizeRequest();
+    const fetchChain = buildSingleQueryChain({
+      data: { id: VALID_TASK_ID, user_id: 'user-1' },
+      error: null
+    });
+
+    const deleteChain = {
+      eq: jest.fn(() => Promise.resolve({ error: null }))
+    };
+    const deleteMock = jest.fn(() => deleteChain);
+
+    supabase.from
+      .mockReturnValueOnce(fetchChain)
+      .mockReturnValueOnce({ delete: deleteMock });
+
+    const response = await request(app)
+      .delete(`/tasks/${VALID_TASK_ID}`)
       .set('Authorization', 'Bearer token-123');
 
     expect(deleteMock).toHaveBeenCalled();
-    expect(chain.eq).toHaveBeenCalledWith('id', 'uuid-1');
-    expect(chain.eq).toHaveBeenCalledWith('user_id', 'user-1');
+    expect(fetchChain.eq).toHaveBeenCalledWith('id', VALID_TASK_ID);
+    expect(deleteChain.eq).toHaveBeenCalledWith('id', VALID_TASK_ID);
     expect(response.status).toBe(204);
     expect(response.text).toBe('');
+  });
+
+  test('DELETE /tasks/:id should return 403 when removing foreign task', async () => {
+    authorizeRequest();
+    const fetchChain = buildSingleQueryChain({
+      data: { id: VALID_TASK_ID, user_id: 'user-2' },
+      error: null
+    });
+    supabase.from.mockReturnValueOnce(fetchChain);
+
+    const response = await request(app)
+      .delete(`/tasks/${VALID_TASK_ID}`)
+      .set('Authorization', 'Bearer token-123');
+
+    expect(response.status).toBe(403);
+    expect(response.body).toEqual({ error: 'Access denied' });
+    expect(supabase.from).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Admin routes', () => {
+  const adminToken = 'Bearer header.eyJ1c2VyX3JvbGUiOiJhZG1pbiJ9.signature';
+
+  test('GET /admin/users should reject non-admins', async () => {
+    authorizeRequest();
+
+    const response = await request(app)
+      .get('/admin/users')
+      .set('Authorization', 'Bearer token-123');
+
+    expect(response.status).toBe(403);
+    expect(response.body).toEqual({ error: 'Admin access required' });
+    expect(supabase.from).not.toHaveBeenCalled();
+  });
+
+  test('GET /admin/users should return user list for admins', async () => {
+    authorizeRequest({ userId: ADMIN_ID, email: 'admin@example.com' });
+    const users = [
+      { id: 'u1', email: 'one@example.com', role: 'user', created_at: '2024-01-01' }
+    ];
+    const chain = buildListQueryChain({ data: users, error: null });
+    supabase.from.mockReturnValue(chain);
+
+    const response = await request(app)
+      .get('/admin/users')
+      .set('Authorization', adminToken);
+
+    expect(supabase.from).toHaveBeenCalledWith('profiles');
+    expect(chain.select).toHaveBeenCalledWith('id,email,role,created_at');
+    expect(chain.order).toHaveBeenCalledWith('created_at', { ascending: true });
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual(users);
+  });
+
+  test('DELETE /admin/users/:id should delete users via Supabase admin API', async () => {
+    authorizeRequest({ userId: ADMIN_ID, email: 'admin@example.com' });
+    const fetchChain = buildSingleQueryChain({
+      data: { id: '550e8400-e29b-41d4-a716-446655440000' },
+      error: null
+    });
+    supabase.from.mockReturnValueOnce(fetchChain);
+    supabase.admin.auth.admin.deleteUser.mockResolvedValue({ error: null });
+
+    const response = await request(app)
+      .delete('/admin/users/550e8400-e29b-41d4-a716-446655440000')
+      .set('Authorization', adminToken);
+
+    expect(response.status).toBe(204);
+    expect(supabase.admin.auth.admin.deleteUser).toHaveBeenCalledWith(
+      '550e8400-e29b-41d4-a716-446655440000'
+    );
   });
 });

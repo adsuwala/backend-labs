@@ -4,7 +4,9 @@ const path = require('path');
 
 const authRoutes = require('./routes/auth');
 const tasksRoutes = require('./routes/tasks');
+const adminRoutes = require('./routes/admin');
 const authMiddleware = require('./middleware/auth');
+const requireAdmin = require('./middleware/requireAdmin');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -50,10 +52,21 @@ app.get('/health', (req, res) => {
 
 app.use('/auth', authRoutes);
 app.use('/tasks', authMiddleware, tasksRoutes);
+app.use('/admin', authMiddleware, requireAdmin, adminRoutes);
+
+app.use((req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
 
 app.use((err, req, res, next) => {
   console.error('Error:', err);
-  res.status(500).json({ error: 'Internal server error' });
+  if (err?.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: 'Invalid JSON payload' });
+  }
+  if (err?.status && err.status >= 400 && err.status < 600) {
+    return res.status(err.status).json({ error: err.message || 'Request failed' });
+  }
+  return res.status(500).json({ error: 'Internal server error' });
 });
 
 if (require.main === module) {

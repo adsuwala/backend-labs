@@ -1,4 +1,5 @@
 const supabase = require('../supabase');
+const { decodeJwt } = require('../utils/jwt');
 
 async function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization || '';
@@ -13,7 +14,18 @@ async function authMiddleware(req, res, next) {
       return res.status(401).json({ error: 'Invalid token' });
     }
 
-    req.user = data.user;
+    const claims = decodeJwt(token);
+    const roleFromToken = claims?.user_role;
+
+    req.user = {
+      id: data.user.id,
+      email: data.user.email,
+      role: roleFromToken === 'admin' ? 'admin' : 'user'
+    };
+    req.auth = {
+      token,
+      claims
+    };
     next();
   } catch (err) {
     console.error('Auth middleware error:', err);
