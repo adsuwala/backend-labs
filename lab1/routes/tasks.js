@@ -1,6 +1,7 @@
 const express = require('express');
 const supabase = require('../supabase');
-const { UUID_REGEX } = require('../utils/validation');
+const supabaseClient = supabase.admin || supabase;
+const { UUID_REGEX, MAX_TITLE_LENGTH, isTooLong } = require('../utils/validation');
 
 const router = express.Router();
 
@@ -83,8 +84,8 @@ router.get('/', async (req, res) => {
     }
 
     let query = usesPagination
-      ? supabase.from('tasks').select('*', { count: 'exact' })
-      : supabase.from('tasks').select('*');
+      ? supabaseClient.from('tasks').select('*', { count: 'exact' })
+      : supabaseClient.from('tasks').select('*');
 
     if (!isAdmin) {
       query = query.eq('user_id', userId);
@@ -153,7 +154,7 @@ router.get('/:id', async (req, res) => {
     return res.status(400).json({ error: 'Task ID must be a valid UUID' });
   }
   try {
-    const { data, error } = await supabase
+    const { data, error } = await supabaseClient
       .from('tasks')
       .select('*')
       .eq('id', id)
@@ -184,14 +185,18 @@ router.post('/', async (req, res) => {
   if (!userId) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
-  if (!title || typeof title !== 'string' || title.trim() === '') {
+  const normalizedTitle = typeof title === 'string' ? title.trim() : '';
+  if (!normalizedTitle) {
     return res.status(400).json({ error: 'Title is required' });
+  }
+  if (isTooLong(normalizedTitle, MAX_TITLE_LENGTH)) {
+    return res.status(400).json({ error: 'Title is too long' });
   }
 
   try {
-    const { data, error } = await supabase
+    const { data, error } = await supabaseClient
       .from('tasks')
-      .insert({ title: title.trim(), user_id: userId })
+      .insert({ title: normalizedTitle, user_id: userId })
       .select()
       .single();
 
@@ -208,7 +213,7 @@ router.post('/', async (req, res) => {
 
 router.patch('/:id', async (req, res) => {
   const { id } = req.params;
-  const { completed } = req.body;
+  const { completed, title } = req.body;
   const userId = req.user?.id;
   const isAdmin = req.user?.role === 'admin';
   if (!userId) {
@@ -218,14 +223,33 @@ router.patch('/:id', async (req, res) => {
     return res.status(400).json({ error: 'Task ID must be a valid UUID' });
   }
 
-  if (completed === undefined || typeof completed !== 'boolean') {
-    return res.status(400).json({
-      error: 'Provide a true/false flag in the request body'
-    });
+  const updates = {};
+  if (completed !== undefined) {
+    if (typeof completed !== 'boolean') {
+      return res.status(400).json({
+        error: 'Provide a true/false flag in the request body'
+      });
+    }
+    updates.completed = completed;
+  }
+
+  if (title !== undefined) {
+    const normalizedTitle = typeof title === 'string' ? title.trim() : '';
+    if (!normalizedTitle) {
+      return res.status(400).json({ error: 'Title is required' });
+    }
+    if (isTooLong(normalizedTitle, MAX_TITLE_LENGTH)) {
+      return res.status(400).json({ error: 'Title is too long' });
+    }
+    updates.title = normalizedTitle;
+  }
+
+  if (Object.keys(updates).length === 0) {
+    return res.status(400).json({ error: 'Provide fields to update' });
   }
 
   try {
-    const { data: existingTask, error: fetchError } = await supabase
+    const { data: existingTask, error: fetchError } = await supabaseClient
       .from('tasks')
       .select('*')
       .eq('id', id)
@@ -243,9 +267,9 @@ router.patch('/:id', async (req, res) => {
       return res.status(403).json({ error: ACCESS_DENIED_MESSAGE });
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await supabaseClient
       .from('tasks')
-      .update({ completed })
+      .update(updates)
       .eq('id', id)
       .select()
       .single();
@@ -272,7 +296,7 @@ router.delete('/:id', async (req, res) => {
     return res.status(400).json({ error: 'Task ID must be a valid UUID' });
   }
   try {
-    const { data: existingTask, error: fetchError } = await supabase
+    const { data: existingTask, error: fetchError } = await supabaseClient
       .from('tasks')
       .select('*')
       .eq('id', id)
@@ -290,7 +314,7 @@ router.delete('/:id', async (req, res) => {
       return res.status(403).json({ error: ACCESS_DENIED_MESSAGE });
     }
 
-    const { error } = await supabase.from('tasks').delete().eq('id', id);
+    const { error } = await supabaseClient.from('tasks').delete().eq('id', id);
 
     if (error) {
       return handleTaskError(res, error, 'Failed to delete task');

@@ -1,18 +1,31 @@
 const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
 const fs = require('fs');
 const path = require('path');
+
+require('dotenv').config();
+
+const { initSentry, Sentry } = require('./monitoring/sentry');
+
+initSentry();
 
 const authRoutes = require('./routes/auth');
 const tasksRoutes = require('./routes/tasks');
 const adminRoutes = require('./routes/admin');
 const authMiddleware = require('./middleware/auth');
 const requireAdmin = require('./middleware/requireAdmin');
+const { globalLimiter, healthLimiter, authLimiter } = require('./middleware/rateLimit');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const LOG_FILE = process.env.LOG_FILE || path.join(__dirname, 'api.log');
 
+app.use(helmet());
+app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
+app.use(globalLimiter);
 
 app.use((req, res, next) => {
   const startTime = Date.now();
@@ -43,13 +56,18 @@ app.get('/', (req, res) => {
   });
 });
 
-app.get('/health', (req, res) => {
+app.get('/health', healthLimiter, (req, res) => {
+  const rawValidationMode = (process.env.VALIDATION_MODE || '').toLowerCase();
+  const validationMode = rawValidationMode === 'minimal' ? 'minimal' : 'full';
+
   res.json({
     status: 'OK',
+    validationMode,
     timestamp: new Date().toISOString()
   });
 });
 
+app.use('/auth/login', authLimiter);
 app.use('/auth', authRoutes);
 app.use('/tasks', authMiddleware, tasksRoutes);
 app.use('/admin', authMiddleware, requireAdmin, adminRoutes);
@@ -57,6 +75,8 @@ app.use('/admin', authMiddleware, requireAdmin, adminRoutes);
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
+
+Sentry.setupExpressErrorHandler(app);
 
 app.use((err, req, res, next) => {
   console.error('Error:', err);
